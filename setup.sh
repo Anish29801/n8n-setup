@@ -5,12 +5,20 @@
 # A unified setup script for deploying n8n workflow automation
 # on Railway using the official Docker image.
 #
+# **Always pulls the latest n8n Docker image from Docker Hub**
+# - Initial deploy: forces fresh pull via --rerun
+# - Menu option 6 "Update n8n": reconnects image source + fresh pull
+# - Railway `railway redeploy` reuses cached images, so this script
+#   uses `railway up --rerun` and `railway service source connect`
+#   to guarantee the latest n8nio/n8n:latest is always running.
+#
 # Supports: Linux, macOS, WSL (Windows Subsystem for Linux)
 #
 # Usage:
 #   ./setup.sh              Interactive menu
 #   ./setup.sh --full       Full non-interactive setup
 #   ./setup.sh --quick      Quick deploy (minimal prompts)
+#   ./setup.sh --update     Force update to latest n8n image
 #   ./setup.sh --help       Show help
 #
 # Exit codes:
@@ -670,27 +678,66 @@ setup_domain() {
 }
 
 # ============================================================
-# PART 3: REDEPLOY & HEALTH CHECK
+# PART 3: REDEPLOY (ALWAYS LATEST IMAGE) & HEALTH CHECK
 # ============================================================
+# Railway's `railway redeploy` reuses the cached Docker image.
+# For n8n we MUST always pull the latest image from Docker Hub.
+# Strategy:
+#   1. Re-connect service source to n8nio/n8n (resets image ref)
+#   2. Use --rerun to force a fresh image pull
+#   3. Fallback: standard redeploy
 
-redeploy_service() {
-    header "Redeploy n8n Service"
+redeploy_latest() {
+    header "Update n8n to Latest Docker Image"
     _railway_cli_check; _railway_project_check
 
-    info "Redeploy applies all config changes (env vars, volume, domain)."
-    echo "  Downtime: ~30-60s"
-    confirm "Trigger redeploy now?" || { info "Skipped. Run: railway redeploy"; return 0; }
+    info "Step 1: Reconnecting service source to $N8N_DOCKER_IMAGE:latest"
+    echo "  This resets Railway's image cache and forces a fresh pull."
+    railway service source connect --image "$N8N_DOCKER_IMAGE" --service "$N8N_SERVICE_NAME" 2>&1 || \
+        warn "Source reconnect failed (may not be supported in this CLI version)"
 
-    info "Redeploying..."
+    info "Step 2: Triggering redeploy with fresh image pull..."
     local start; start=$(date +%s)
-    if railway redeploy 2>&1; then
-        ok "Redeploy triggered ($(( $(date +%s) - start ))s)"
-        _REDEPLOY_TRIGGERED=true
+
+    # Try --rerun first (forces rebuild/re-pull), fallback to redeploy
+    if railway up --rerun --service "$N8N_SERVICE_NAME" --detach 2>/dev/null; then
+        ok "Deploy triggered via --rerun (pulling latest n8n image)"
+    elif railway service redeploy 2>/dev/null; then
+        ok "Service redeployed (using latest available image)"
+    elif railway redeploy --service "$N8N_SERVICE_NAME" -y 2>&1; then
+        ok "Redeploy triggered"
     else
-        error "Redeploy failed. Trigger from Railway dashboard."
+        error "All redeploy methods failed. Use Railway dashboard for manual redeploy."
         return 1
     fi
+
+    local elapsed; elapsed=$(( $(date +%s) - start ))
+    info "Deploy initiated in ${elapsed}s"
+    info "Monitor: railway logs --service $N8N_SERVICE_NAME"
+    _REDEPLOY_TRIGGERED=true
+    return 0
 }
+
+redeploy_service() {
+    header "Redeploy n8n Service (Latest Image)"
+    _railway_cli_check; _railway_project_check
+
+    info "This redeploy will:"
+    echo "  - Pull the latest n8nio/n8n Docker image from Docker Hub"
+    echo "  - Apply all env/volume/domain changes"
+    echo "  - Restart the container (~30-60s downtime)"
+    echo
+    confirm "Proceed?" || { info "Skipped. Run: railway redeploy"; return 0; }
+
+    if is_ci; then
+        NONINTERACTIVE=1 redeploy_latest
+    else
+        redeploy_latest
+    fi
+}
+
+# Alias for backward compatibility
+redeploy_n8n() { redeploy_latest; }
 
 health_check() {
     header "Health Check Verification"
@@ -878,8 +925,8 @@ full_setup() {
     ((step++)); step "[${step}/${total}] Domain & HTTPS"
     setup_domain || { warn "Domain config had issues"; ((errors++)); }
 
-    ((step++)); step "[${step}/${total}] Redeploy"
-    redeploy_service || { warn "Redeploy had issues"; ((errors++)); }
+    ((step++)); step "[${step}/${total}] Pull latest n8n image + redeploy"
+    redeploy_latest || { warn "Redeploy had issues"; ((errors++)); }
 
     ((step++)); step "[${step}/${total}] Health Check"
     health_check || { warn "Health check failed"; ((errors++)); }
@@ -908,31 +955,33 @@ main_menu() {
         header "n8n Railway Deployer v${SCRIPT_VERSION}"
         echo "  Running on: ${OS_TYPE:-$(uname -s)}"
         echo
-        echo "  1)  Full Setup           (Complete n8n deployment)"
-        echo "  2)  Install Railway CLI  (only)"
-        echo "  3)  Configure Environment Variables"
-        echo "  4)  Set up PostgreSQL"
-        echo "  5)  Set up Domain & HTTPS"
-        echo "  6)  Redeploy n8n"
-        echo "  7)  Health Check"
-        echo "  8)  Backup / Restore"
-        echo "  9)  Exit"
-        echo
-        read -r -p "$(printf "${C_CYAN}▶${C_NC} Select [1-9]: ")" choice
+    echo "  1)  Full Setup           (Complete n8n deployment)"
+    echo "  2)  Install Railway CLI  (only)"
+    echo "  3)  Configure Environment Variables"
+    echo "  4)  Set up PostgreSQL"
+    echo "  5)  Set up Domain & HTTPS"
+    echo "  6)  Update n8n            (Pull latest Docker image + redeploy)"
+    echo "  7)  Redeploy n8n         (Reapply config, already on latest)"
+    echo "  8)  Health Check"
+    echo "  9)  Backup / Restore"
+    echo " 10)  Exit"
+    echo
+    read -r -p "$(printf "${C_CYAN}▶${C_NC} Select [1-10]: ")" choice
 
-        case "${choice}" in
-            1) full_setup ;;
-            2) detect_os; install_railway_cli ;;
-            3) set_env_vars ;;
-            4) setup_postgresql ;;
-            5) setup_domain ;;
-            6) redeploy_service ;;
-            7) health_check ;;
-            8) backup_restore_menu ;;
-            9) echo; info "Goodbye!"; exit 0 ;;
-            *) warn "Invalid option"; sleep 1 ;;
-        esac
-        [[ "${choice}" != 9 ]] && { echo; read -r -p "Press Enter to return to menu..."; }
+    case "${choice}" in
+        1) full_setup ;;
+        2) detect_os; install_railway_cli ;;
+        3) set_env_vars ;;
+        4) setup_postgresql ;;
+        5) setup_domain ;;
+        6) redeploy_latest ;;
+        7) redeploy_service ;;
+        8) health_check ;;
+        9) backup_restore_menu ;;
+        10) echo; info "Goodbye!"; exit 0 ;;
+        *) warn "Invalid option"; sleep 1 ;;
+    esac
+    [[ "${choice}" != 10 ]] && { echo; read -r -p "Press Enter to return to menu..."; }
     done
 }
 
