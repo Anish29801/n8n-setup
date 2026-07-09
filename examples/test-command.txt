@@ -1,3 +1,0 @@
-TEST COMMAND - Copy-paste this into PowerShell:
-
-curl.exe -X POST "https://n8n-production-509b.up.railway.app/webhook-test/webhook-email" -H "Content-Type: application/json" -d '{"subject":"Server Alert","message":"CPU 94% on prod-web-01"}'

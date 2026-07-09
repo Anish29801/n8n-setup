@@ -1,4 +1,0 @@
-{
-  "subject": "Server Alert - CPU Overload",
-  "message": "CPU usage exceeded 90% on server prod-web-01.\n\nDetails:\n- Server: prod-web-01\n- CPU: 94.2%\n- Memory: 67%\n- Time: 2026-07-04 16:45 UTC\n\nAction required within 15 minutes."
-}
